@@ -99,6 +99,8 @@ class ImpalaEncoder(nn.Module):
 
         return out
 
+class DinoV3Encoder(nn.Module):
+
 
 class GCEncoder(nn.Module):
     """Helper module to handle inputs to goal-conditioned networks.
