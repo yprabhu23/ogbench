@@ -99,7 +99,9 @@ class ImpalaEncoder(nn.Module):
 
         return out
 
-class DinoV3Encoder(nn.Module):
+# class DinoV3Encoder(nn.Module):
+#     """DinoV3Encoder"""
+#     def 
 
 
 class GCEncoder(nn.Module):
@@ -143,5 +145,5 @@ encoder_modules = {
     'impala_debug': functools.partial(ImpalaEncoder, num_blocks=1, stack_sizes=(4, 4)),
     'impala_small': functools.partial(ImpalaEncoder, num_blocks=1),
     'impala_large': functools.partial(ImpalaEncoder, stack_sizes=(64, 128, 128), mlp_hidden_dims=(1024,)),
-    'dinov3_identity': functools.partial(),#TODO: Complete this
+    # 'dinov3_identity': functools.partial(),#TODO: Complete this
 }
