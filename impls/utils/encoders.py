@@ -608,6 +608,66 @@ class ResNet50Encoder(nn.Module):
         
         return out
 
+class DinoV3AdapterEncoder(nn.Module):
+    """Frozen DinoV3 encoder + small normalization + projection adapter.
+    
+    This fixes feature magnitude issues, provides ImageNet norm, 
+    reduces dimension, and produces IMPALA-like feature scales.
+    """
+    out_dim: int = 512   # final embedding dimension
+    mlp_hidden: int = 1024  # internal projection MLP size
+    apply_mlp: bool = True
+
+    def setup(self):
+        self.mean = jnp.array([0.485, 0.456, 0.406])  # ImageNet mean
+        self.std = jnp.array([0.229, 0.224, 0.225])    # ImageNet std
+
+        # Projection MLP (trainable)
+        if self.apply_mlp:
+            self.adapter = MLP(
+                hidden_dims=[self.mlp_hidden, self.out_dim],
+                activate_final=False,
+            )
+
+    def _split_frames(self, x):
+        k = x.shape[-1] // 3
+        return jnp.split(x, k, axis=-1)
+
+    def _normalize(self, x):
+        # x: float32 in [0,1]
+        return (x - self.mean) / self.std
+
+    def __call__(self, x, train=True):
+        # Convert to float
+        x = x.astype(jnp.float32) / 255.0
+
+        frames = self._split_frames(x)
+        enc = DINO_V3_ENCODER
+        key = jax.random.PRNGKey(0)
+
+        def encode_single(img_hw3):
+            img_norm = self._normalize(img_hw3)
+            img_chw = jnp.transpose(img_norm, (2,0,1))
+            feats = enc.features(img_chw, key)
+            return enc.norm(feats[0])  # CLS
+
+        frame_embs = []
+        for f in frames:
+            if f.ndim == 3:
+                f = f[None, ...]
+            cls_batch = jax.vmap(encode_single)(f)
+            if x.ndim == 3:
+                cls_batch = cls_batch[0]
+            frame_embs.append(cls_batch)
+
+        out = jnp.concatenate(frame_embs, axis=-1)
+
+        # Small adapter projection (trainable)
+        if self.apply_mlp:
+            out = self.adapter(out)
+
+        return out
+
 
 class GCEncoder(nn.Module):
     """Helper module to handle inputs to goal-conditioned networks.
