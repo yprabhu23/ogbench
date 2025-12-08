@@ -332,21 +332,75 @@ class VisionTransformerEncoder(nn.Module):
         Returns:
             Encoded representation: (B, embed_dim * num_frames) or (embed_dim * num_frames,)
         """
-        # Split stacked frames
-        frames = self._split_frames(x)  # list of (B, H, W, 3) or (H, W, 3)
+        # Normalize pixel values
+        x = x.astype(jnp.float32) / 255.0
         
-        # Encode each frame
-        frame_embs = []
-        for f in frames:
-            cls_emb = self._encode_single_frame(f, train=train)
-            frame_embs.append(cls_emb)
+        # Handle single image vs batch
+        single = (x.ndim == 3)
+        if single:
+            x = x[None, ...]  # (1, H, W, 3*k)
         
-        # Concatenate over frames
-        out = jnp.concatenate(frame_embs, axis=-1)  # (B, embed_dim * num_frames) or (embed_dim * num_frames,)
+        B, H, W, C = x.shape
+        num_frames = C // 3
+        
+        # Reshape to separate frames: (B, H, W, 3*k) -> (B * num_frames, H, W, 3)
+        # This allows processing all frames in parallel
+        x_reshaped = x.reshape(B, H, W, num_frames, 3)
+        x_reshaped = x_reshaped.transpose(0, 3, 1, 2, 4)  # (B, num_frames, H, W, 3)
+        x_reshaped = x_reshaped.reshape(B * num_frames, H, W, 3)  # (B * num_frames, H, W, 3)
+        
+        # Process all frames in parallel through the encoder
+        # Patch embedding: (B * num_frames, H, W, 3) -> (B * num_frames, num_patches, embed_dim)
+        x_patches = self.patch_embed(x_reshaped)  # (B * num_frames, H/patch_size, W/patch_size, embed_dim)
+        num_patches_h = x_patches.shape[1]
+        num_patches_w = x_patches.shape[2]
+        num_patches = num_patches_h * num_patches_w
+        
+        x_patches = x_patches.reshape(B * num_frames, num_patches, self.embed_dim)
+        
+        # Add CLS token
+        cls_tokens = jnp.broadcast_to(self.cls_token, (B * num_frames, 1, self.embed_dim))
+        x_patches = jnp.concatenate([cls_tokens, x_patches], axis=1)  # (B * num_frames, num_patches + 1, embed_dim)
+        
+        # Add positional embeddings
+        required_len = num_patches + 1  # +1 for CLS token
+        if required_len <= self.pos_embed.shape[1]:
+            pos_embed = self.pos_embed[:, :required_len, :]  # (1, num_patches + 1, embed_dim)
+        else:
+            # Interpolate if needed
+            pos_embed_base = self.pos_embed
+            extra_patches = required_len - pos_embed_base.shape[1]
+            last_patch = pos_embed_base[:, -1:, :]
+            extra_embeds = jnp.repeat(last_patch, extra_patches, axis=1)
+            pos_embed = jnp.concatenate([pos_embed_base, extra_embeds], axis=1)
+        
+        # Broadcast pos_embed to match batch size
+        pos_embed = jnp.broadcast_to(pos_embed, (B * num_frames, required_len, self.embed_dim))
+        x_patches = x_patches + pos_embed
+        
+        # Apply dropout
+        if self.dropout_rate > 0:
+            x_patches = self.dropout(x_patches, deterministic=not train)
+        
+        # Apply transformer blocks
+        for block in self.transformer_blocks:
+            x_patches = block(x_patches, train=train)
+        
+        # Layer norm
+        x_patches = self.ln_post(x_patches)
+        
+        # Extract CLS token (first token) for all frames
+        cls_tokens_all = x_patches[:, 0]  # (B * num_frames, embed_dim)
+        
+        # Reshape back: (B * num_frames, embed_dim) -> (B, num_frames, embed_dim) -> (B, num_frames * embed_dim)
+        cls_tokens_all = cls_tokens_all.reshape(B, num_frames, self.embed_dim)
+        out = cls_tokens_all.reshape(B, num_frames * self.embed_dim)
+        
+        if single:
+            out = out[0]  # (num_frames * embed_dim,)
         
         # Apply MLP head if enabled
         if self.apply_mlp:
-            # Handle single vs batch
             if out.ndim == 1:
                 out = out[None, ...]
                 out = self.head(out)
@@ -379,7 +433,8 @@ class TransformerBlock(nn.Module):
         
         # MLP
         self.mlp = MLP(
-            hidden_dims=(self.mlp_dim,),
+            # We must go UP to mlp_dim, then DOWN to embed_dim
+            hidden_dims=(self.mlp_dim, self.embed_dim), 
             activate_final=False,
             activations=nn.gelu,
         )
