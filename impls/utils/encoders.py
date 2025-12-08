@@ -495,14 +495,16 @@ class BottleneckBlock(nn.Module):
         shortcut = x
         if self.use_projection:
             # 1x1 conv to match dimensions
-            shortcut = nn.Conv(
-                features=self.filters * 4,  # Bottleneck expands by 4x
-                kernel_size=(1, 1),
-                strides=self.stride,
-                kernel_init=initializer,
-                use_bias=False,
-            )(shortcut)
+            # shortcut = nn.Conv(
+            #     features=self.filters * 4,  # Bottleneck expands by 4x
+            #     kernel_size=(1, 1),
+            #     strides=self.stride,
+            #     kernel_init=initializer,
+            #     use_bias=False,
+            # )(shortcut)
+            shortcut = nn.LayerNorm()(shortcut)
             shortcut = nn.BatchNorm(use_running_average=not train)(shortcut)
+            
         
         # Main path: 1x1 -> 3x3 -> 1x1
         # 1x1 conv (reduce channels)
@@ -513,7 +515,9 @@ class BottleneckBlock(nn.Module):
             kernel_init=initializer,
             use_bias=False,
         )(x)
-        out = nn.BatchNorm(use_running_average=not train)(out)
+        # out = nn.BatchNorm(use_running_average=not train)(out)
+        # you can do something like:
+        out = nn.LayerNorm()(out)
         out = nn.relu(out)
         
         # 3x3 conv (main conv)
