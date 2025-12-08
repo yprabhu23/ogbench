@@ -99,7 +99,7 @@ class ImpalaEncoder(nn.Module):
         out = MLP(self.mlp_hidden_dims, activate_final=True, layer_norm=self.layer_norm)(out)
 
         return out
-    
+   
 # image_encoder = load_model("vit", "dinov3_vits16_pretrain_lvd1689m")
 
 import jax
@@ -172,11 +172,11 @@ class DinoV3Encoder(nn.Module):
 
 class VisionTransformerEncoder(nn.Module):
     """Plain Vision Transformer encoder (trainable from scratch).
-    
+   
     This is an ablation of DINOv3 to test whether pretraining or architecture drives performance.
     Implements standard ViT architecture: patch embedding → positional encoding → transformer blocks → CLS token.
     """
-    
+   
     patch_size: int = 16
     embed_dim: int = 768
     num_heads: int = 12
@@ -185,7 +185,7 @@ class VisionTransformerEncoder(nn.Module):
     dropout_rate: float = 0.0
     mlp_hidden_dims: Sequence[int] = (512,)
     apply_mlp: bool = True
-    
+   
     def setup(self):
         # MLP dimension defaults to 4×embed_dim (standard ViT)
         mlp_dim = self.mlp_dim
@@ -239,48 +239,48 @@ class VisionTransformerEncoder(nn.Module):
         if self.apply_mlp:
             self.head = MLP(self.mlp_hidden_dims, activate_final=True)
 
-    
+   
     def _split_frames(self, x):
         """Split stacked frames along channel dim.
-        
+       
         x: (B, H, W, 3*k) or (H, W, 3*k)
         → list of frames, each (B, H, W, 3) or (H, W, 3)
         """
         k = x.shape[-1] // 3
         return jnp.split(x, k, axis=-1)
-    
+   
     def _encode_single_frame(self, img, train=True):
         """Encode a single frame through ViT.
-        
+       
         Args:
             img: (B, H, W, 3) or (H, W, 3) image tensor
             train: Whether in training mode
-        
+       
         Returns:
             CLS token representation: (B, embed_dim) or (embed_dim,)
         """
         # Normalize pixel values
         x = img.astype(jnp.float32) / 255.0
-        
+       
         # Handle single image vs batch
         single = (x.ndim == 3)
         if single:
             x = x[None, ...]  # (1, H, W, 3)
-        
+       
         B, H, W, C = x.shape
-        
+       
         # Patch embedding: (B, H, W, C) -> (B, num_patches, embed_dim)
         x = self.patch_embed(x)  # (B, H/patch_size, W/patch_size, embed_dim)
         num_patches_h = x.shape[1]
         num_patches_w = x.shape[2]
         num_patches = num_patches_h * num_patches_w
-        
+       
         x = x.reshape(B, num_patches, self.embed_dim)
-        
+       
         # Add CLS token
         cls_tokens = jnp.broadcast_to(self.cls_token, (B, 1, self.embed_dim))
         x = jnp.concatenate([cls_tokens, x], axis=1)  # (B, num_patches + 1, embed_dim)
-        
+       
         # Add positional embeddings
         # Use the pre-created positional embeddings, truncating if needed
         # pos_embed shape: (1, max_patches + 1, embed_dim)
@@ -298,73 +298,127 @@ class VisionTransformerEncoder(nn.Module):
             last_patch = pos_embed_base[:, -1:, :]  # (1, 1, embed_dim)
             extra_embeds = jnp.repeat(last_patch, extra_patches, axis=1)
             pos_embed = jnp.concatenate([pos_embed_base, extra_embeds], axis=1)
-        
+       
         x = x + pos_embed
-        
+       
         # Apply dropout
         if self.dropout_rate > 0:
             x = self.dropout(x, deterministic=not train)
-        
+       
         # Apply transformer blocks
         for block in self.transformer_blocks:
             x = block(x, train=train)
-        
+       
         # Layer norm
         x = self.ln_post(x)
-        
+       
         # Extract CLS token (first token)
         cls_token = x[:, 0]  # (B, embed_dim)
-        
+       
         if single:
             cls_token = cls_token[0]  # (embed_dim,)
-        
+       
         return cls_token
-    
+   
     @nn.compact
     def __call__(self, x, train=True, cond_var=None):
         """Forward pass with frame stacking support.
-        
+       
         Args:
             x: (B, H, W, 3*k) or (H, W, 3*k) image tensor with stacked frames
             train: Whether in training mode
             cond_var: Unused (for compatibility)
-        
+       
         Returns:
             Encoded representation: (B, embed_dim * num_frames) or (embed_dim * num_frames,)
         """
-        # Split stacked frames
-        frames = self._split_frames(x)  # list of (B, H, W, 3) or (H, W, 3)
-        
-        # Encode each frame
-        frame_embs = []
-        for f in frames:
-            cls_emb = self._encode_single_frame(f, train=train)
-            frame_embs.append(cls_emb)
-        
-        # Concatenate over frames
-        out = jnp.concatenate(frame_embs, axis=-1)  # (B, embed_dim * num_frames) or (embed_dim * num_frames,)
-        
+        # Normalize pixel values
+        x = x.astype(jnp.float32) / 255.0
+       
+        # Handle single image vs batch
+        single = (x.ndim == 3)
+        if single:
+            x = x[None, ...]  # (1, H, W, 3*k)
+       
+        B, H, W, C = x.shape
+        num_frames = C // 3
+       
+        # Reshape to separate frames: (B, H, W, 3*k) -> (B * num_frames, H, W, 3)
+        # This allows processing all frames in parallel
+        x_reshaped = x.reshape(B, H, W, num_frames, 3)
+        x_reshaped = x_reshaped.transpose(0, 3, 1, 2, 4)  # (B, num_frames, H, W, 3)
+        x_reshaped = x_reshaped.reshape(B * num_frames, H, W, 3)  # (B * num_frames, H, W, 3)
+       
+        # Process all frames in parallel through the encoder
+        # Patch embedding: (B * num_frames, H, W, 3) -> (B * num_frames, num_patches, embed_dim)
+        x_patches = self.patch_embed(x_reshaped)  # (B * num_frames, H/patch_size, W/patch_size, embed_dim)
+        num_patches_h = x_patches.shape[1]
+        num_patches_w = x_patches.shape[2]
+        num_patches = num_patches_h * num_patches_w
+       
+        x_patches = x_patches.reshape(B * num_frames, num_patches, self.embed_dim)
+       
+        # Add CLS token
+        cls_tokens = jnp.broadcast_to(self.cls_token, (B * num_frames, 1, self.embed_dim))
+        x_patches = jnp.concatenate([cls_tokens, x_patches], axis=1)  # (B * num_frames, num_patches + 1, embed_dim)
+       
+        # Add positional embeddings
+        required_len = num_patches + 1  # +1 for CLS token
+        if required_len <= self.pos_embed.shape[1]:
+            pos_embed = self.pos_embed[:, :required_len, :]  # (1, num_patches + 1, embed_dim)
+        else:
+            # Interpolate if needed
+            pos_embed_base = self.pos_embed
+            extra_patches = required_len - pos_embed_base.shape[1]
+            last_patch = pos_embed_base[:, -1:, :]
+            extra_embeds = jnp.repeat(last_patch, extra_patches, axis=1)
+            pos_embed = jnp.concatenate([pos_embed_base, extra_embeds], axis=1)
+       
+        # Broadcast pos_embed to match batch size
+        pos_embed = jnp.broadcast_to(pos_embed, (B * num_frames, required_len, self.embed_dim))
+        x_patches = x_patches + pos_embed
+       
+        # Apply dropout
+        if self.dropout_rate > 0:
+            x_patches = self.dropout(x_patches, deterministic=not train)
+       
+        # Apply transformer blocks
+        for block in self.transformer_blocks:
+            x_patches = block(x_patches, train=train)
+       
+        # Layer norm
+        x_patches = self.ln_post(x_patches)
+       
+        # Extract CLS token (first token) for all frames
+        cls_tokens_all = x_patches[:, 0]  # (B * num_frames, embed_dim)
+       
+        # Reshape back: (B * num_frames, embed_dim) -> (B, num_frames, embed_dim) -> (B, num_frames * embed_dim)
+        cls_tokens_all = cls_tokens_all.reshape(B, num_frames, self.embed_dim)
+        out = cls_tokens_all.reshape(B, num_frames * self.embed_dim)
+       
+        if single:
+            out = out[0]  # (num_frames * embed_dim,)
+       
         # Apply MLP head if enabled
         if self.apply_mlp:
-            # Handle single vs batch
             if out.ndim == 1:
                 out = out[None, ...]
                 out = self.head(out)
                 out = out[0]
             else:
                 out = self.head(out)
-        
+       
         return out
 
 
 class TransformerBlock(nn.Module):
     """Single transformer block with self-attention and MLP."""
-    
+   
     embed_dim: int
     num_heads: int
     mlp_dim: int
     dropout_rate: float = 0.0
-    
+   
     def setup(self):
         # Self-attention
         self.attention = nn.MultiHeadDotProductAttention(
@@ -372,30 +426,31 @@ class TransformerBlock(nn.Module):
             qkv_features=self.embed_dim,
             dropout_rate=self.dropout_rate,
         )
-        
+       
         # Layer norms
         self.ln1 = nn.LayerNorm()
         self.ln2 = nn.LayerNorm()
-        
+       
         # MLP
         self.mlp = MLP(
-            hidden_dims=(self.mlp_dim,),
+            # We must go UP to mlp_dim, then DOWN to embed_dim
+            hidden_dims=(self.mlp_dim, self.embed_dim),
             activate_final=False,
             activations=nn.gelu,
         )
-        
+       
         # Dropout
         if self.dropout_rate > 0:
             self.dropout1 = nn.Dropout(rate=self.dropout_rate)
             self.dropout2 = nn.Dropout(rate=self.dropout_rate)
-    
+   
     def __call__(self, x, train=True):
         """Apply transformer block.
-        
+       
         Args:
             x: (B, seq_len, embed_dim) input tokens
             train: Whether in training mode
-        
+       
         Returns:
             (B, seq_len, embed_dim) output tokens
         """
@@ -405,37 +460,37 @@ class TransformerBlock(nn.Module):
             attn_out = self.dropout1(attn_out, deterministic=not train)
         x = x + attn_out
         x = self.ln1(x)
-        
+       
         # MLP with residual
         mlp_out = self.mlp(x)
         if self.dropout_rate > 0:
             mlp_out = self.dropout2(mlp_out, deterministic=not train)
         x = x + mlp_out
         x = self.ln2(x)
-        
+       
         return x
 
 
 class BottleneckBlock(nn.Module):
     """ResNet bottleneck block (1x1 -> 3x3 -> 1x1 convs with residual connection)."""
-    
+   
     filters: int
     stride: int = 1
     use_projection: bool = False
-    
+   
     @nn.compact
     def __call__(self, x, train=True):
         """Apply bottleneck block.
-        
+       
         Args:
             x: (B, H, W, C) input tensor
             train: Whether in training mode
-        
+       
         Returns:
             (B, H', W', filters) output tensor
         """
         initializer = nn.initializers.he_normal()
-        
+       
         # Shortcut connection
         shortcut = x
         if self.use_projection:
@@ -448,7 +503,7 @@ class BottleneckBlock(nn.Module):
                 use_bias=False,
             )(shortcut)
             shortcut = nn.BatchNorm(use_running_average=not train)(shortcut)
-        
+       
         # Main path: 1x1 -> 3x3 -> 1x1
         # 1x1 conv (reduce channels)
         out = nn.Conv(
@@ -460,7 +515,7 @@ class BottleneckBlock(nn.Module):
         )(x)
         out = nn.BatchNorm(use_running_average=not train)(out)
         out = nn.relu(out)
-        
+       
         # 3x3 conv (main conv)
         out = nn.Conv(
             features=self.filters,
@@ -472,7 +527,7 @@ class BottleneckBlock(nn.Module):
         )(out)
         out = nn.BatchNorm(use_running_average=not train)(out)
         out = nn.relu(out)
-        
+       
         # 1x1 conv (expand channels)
         out = nn.Conv(
             features=self.filters * 4,  # Expand by 4x
@@ -482,69 +537,69 @@ class BottleneckBlock(nn.Module):
             use_bias=False,
         )(out)
         out = nn.BatchNorm(use_running_average=not train)(out)
-        
+       
         # Add residual and apply ReLU
         out = out + shortcut
         out = nn.relu(out)
-        
+       
         return out
 
 
 class ResNet50Encoder(nn.Module):
     """ResNet50 encoder (trainable from scratch).
-    
+   
     Standard ResNet50 architecture with bottleneck blocks:
     - Initial 7x7 conv + max pooling
     - 4 stages with bottleneck blocks (3, 4, 6, 3 blocks)
     - Global average pooling
     - Optional MLP head
     """
-    
+   
     mlp_hidden_dims: Sequence[int] = (512,)
     apply_mlp: bool = True
-    
+   
     def setup(self):
         # Optional MLP head
         if self.apply_mlp:
             self.head = MLP(self.mlp_hidden_dims, activate_final=True)
-    
+   
     def _split_frames(self, x):
         """Split stacked frames along channel dim.
-        
+       
         x: (B, H, W, 3*k) or (H, W, 3*k)
         → list of frames, each (B, H, W, 3) or (H, W, 3)
         """
         k = x.shape[-1] // 3
         return jnp.split(x, k, axis=-1)
-    
+   
     @nn.compact
     def __call__(self, x, train=True, cond_var=None):
         """Forward pass with frame stacking support.
-        
+       
         Args:
             x: (B, H, W, 3*k) or (H, W, 3*k) image tensor with stacked frames
             train: Whether in training mode
             cond_var: Unused (for compatibility)
-        
+       
         Returns:
             Encoded representation: (B, 2048 * num_frames) or (2048 * num_frames,)
         """
         # Split stacked frames
         frames = self._split_frames(x)  # list of (B, H, W, 3) or (H, W, 3)
-        
+       
         # Encode each frame
         frame_embs = []
         for frame_idx, f in enumerate(frames):
             # Normalize pixel values
             img = f.astype(jnp.float32) / 255.0
-            
+           
             # Handle single image vs batch
             single = (img.ndim == 3)
             if single:
                 img = img[None, ...]  # (1, H, W, 3)
-            
+           
             initializer = nn.initializers.he_normal()
-            
+           
             # Initial 7x7 conv layer
             x_frame = nn.Conv(
                 features=64,
@@ -556,7 +611,7 @@ class ResNet50Encoder(nn.Module):
             )(img)
             x_frame = nn.BatchNorm(use_running_average=not train)(x_frame)
             x_frame = nn.relu(x_frame)
-            
+           
             # Max pooling
             x_frame = nn.max_pool(
                 x_frame,
@@ -564,39 +619,39 @@ class ResNet50Encoder(nn.Module):
                 strides=(2, 2),
                 padding='SAME',
             )
-            
+           
             # Stage 1: 3 bottleneck blocks, 256 filters (64 * 4)
             x_frame = BottleneckBlock(filters=64, stride=1, use_projection=True)(x_frame, train=train)
             for _ in range(2):
                 x_frame = BottleneckBlock(filters=64, stride=1, use_projection=False)(x_frame, train=train)
-            
+           
             # Stage 2: 4 bottleneck blocks, 512 filters (128 * 4)
             x_frame = BottleneckBlock(filters=128, stride=2, use_projection=True)(x_frame, train=train)
             for _ in range(3):
                 x_frame = BottleneckBlock(filters=128, stride=1, use_projection=False)(x_frame, train=train)
-            
+           
             # Stage 3: 6 bottleneck blocks, 1024 filters (256 * 4)
             x_frame = BottleneckBlock(filters=256, stride=2, use_projection=True)(x_frame, train=train)
             for _ in range(5):
                 x_frame = BottleneckBlock(filters=256, stride=1, use_projection=False)(x_frame, train=train)
-            
+           
             # Stage 4: 3 bottleneck blocks, 2048 filters (512 * 4)
             x_frame = BottleneckBlock(filters=512, stride=2, use_projection=True)(x_frame, train=train)
             for _ in range(2):
                 x_frame = BottleneckBlock(filters=512, stride=1, use_projection=False)(x_frame, train=train)
-            
+           
             # Global average pooling
             # x_frame shape: (B, H', W', 2048)
             x_frame = jnp.mean(x_frame, axis=(1, 2))  # (B, 2048)
-            
+           
             if single:
                 x_frame = x_frame[0]  # (2048,)
-            
+           
             frame_embs.append(x_frame)
-        
+       
         # Concatenate over frames
         out = jnp.concatenate(frame_embs, axis=-1)  # (B, 2048 * num_frames) or (2048 * num_frames,)
-        
+       
         # Apply MLP head if enabled
         if self.apply_mlp:
             # Handle single vs batch
@@ -606,13 +661,13 @@ class ResNet50Encoder(nn.Module):
                 out = out[0]
             else:
                 out = self.head(out)
-        
+       
         return out
 
 class DinoV3AdapterEncoder(nn.Module):
     """Frozen DinoV3 encoder + small normalization + projection adapter.
-    
-    This fixes feature magnitude issues, provides ImageNet norm, 
+   
+    This fixes feature magnitude issues, provides ImageNet norm,
     reduces dimension, and produces IMPALA-like feature scales.
     """
     out_dim: int = 512   # final embedding dimension
@@ -732,3 +787,4 @@ encoder_modules = {
     'resnet50': ResNet50Encoder,
     'dinov3_adapter': DinoV3AdapterEncoder,   # NEW
 }
+
