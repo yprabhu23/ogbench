@@ -502,7 +502,8 @@ class BottleneckBlock(nn.Module):
                 kernel_init=initializer,
                 use_bias=False,
             )(shortcut)
-            shortcut = nn.BatchNorm(use_running_average=not train)(shortcut)
+            # shortcut = nn.BatchNorm(use_running_average=not train)(shortcut)
+            shortcut = nn.GroupNorm(num_groups=32)(shortcut)
         
         # Main path: 1x1 -> 3x3 -> 1x1
         # 1x1 conv (reduce channels)
@@ -513,7 +514,8 @@ class BottleneckBlock(nn.Module):
             kernel_init=initializer,
             use_bias=False,
         )(x)
-        out = nn.BatchNorm(use_running_average=not train)(out)
+        # out = nn.BatchNorm(use_running_average=not train)(out)
+        out = nn.GroupNorm(num_groups=32)(out)
         out = nn.relu(out)
         
         # 3x3 conv (main conv)
@@ -525,7 +527,8 @@ class BottleneckBlock(nn.Module):
             kernel_init=initializer,
             use_bias=False,
         )(out)
-        out = nn.BatchNorm(use_running_average=not train)(out)
+        # out = nn.BatchNorm(use_running_average=not train)(out)
+        out = nn.GroupNorm(num_groups=32)(out)
         out = nn.relu(out)
         
         # 1x1 conv (expand channels)
@@ -536,7 +539,8 @@ class BottleneckBlock(nn.Module):
             kernel_init=initializer,
             use_bias=False,
         )(out)
-        out = nn.BatchNorm(use_running_average=not train)(out)
+        # out = nn.BatchNorm(use_running_average=not train)(out)
+        out = nn.GroupNorm(num_groups=32)(out)
         
         # Add residual and apply ReLU
         out = out + shortcut
@@ -609,7 +613,8 @@ class ResNet50Encoder(nn.Module):
                 kernel_init=initializer,
                 use_bias=False,
             )(img)
-            x_frame = nn.BatchNorm(use_running_average=not train)(x_frame)
+            # x_frame = nn.BatchNorm(use_running_average=not train)(x_frame)
+            x_frame = nn.GroupNorm(num_groups=32)(x_frame)
             x_frame = nn.relu(x_frame)
             
             # Max pooling
