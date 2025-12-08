@@ -729,4 +729,5 @@ encoder_modules = {
     ),
     # ResNet50 encoder (trainable from scratch)
     'resnet50': ResNet50Encoder,
+    'dinov3_adapter': DinoV3AdapterEncoder,   # NEW
 }
