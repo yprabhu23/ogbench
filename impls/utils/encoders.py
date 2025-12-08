@@ -187,10 +187,11 @@ class VisionTransformerEncoder(nn.Module):
     apply_mlp: bool = True
     
     def setup(self):
-        # MLP dimension defaults to 4x embed_dim (standard ViT)
-        if self.mlp_dim is None:
-            self.mlp_dim = 4 * self.embed_dim
-        
+        # MLP dimension defaults to 4×embed_dim (standard ViT)
+        mlp_dim = self.mlp_dim
+        if mlp_dim is None:
+            mlp_dim = 4 * self.embed_dim
+
         # Patch embedding: Conv layer that creates patches
         self.patch_embed = nn.Conv(
             features=self.embed_dim,
@@ -199,45 +200,45 @@ class VisionTransformerEncoder(nn.Module):
             padding='VALID',
             kernel_init=nn.initializers.xavier_uniform(),
         )
-        
+
         # CLS token (learnable)
         self.cls_token = self.param(
             'cls_token',
             nn.initializers.normal(stddev=0.02),
-            (1, 1, self.embed_dim)
+            (1, 1, self.embed_dim),
         )
-        
-        # Positional embeddings: create a large enough embedding for typical image sizes
-        # We'll use max_patches = 14*14 = 196 (for 224x224 images with patch_size=16)
-        # This covers most common image sizes. For larger images, we can interpolate.
-        max_patches = 196  # 14*14 patches
+
+        # Positional embeddings: large enough for typical image sizes
+        # max_patches = 14×14 = 196 (for 224×224 with patch_size=16)
+        max_patches = 196
         self.pos_embed = self.param(
             'pos_embed',
             nn.initializers.normal(stddev=0.02),
-            (1, max_patches + 1, self.embed_dim)  # +1 for CLS token
+            (1, max_patches + 1, self.embed_dim),  # +1 for CLS token
         )
-        
+
         # Dropout
         if self.dropout_rate > 0:
             self.dropout = nn.Dropout(rate=self.dropout_rate)
-        
+
         # Transformer blocks
         self.transformer_blocks = [
             TransformerBlock(
                 embed_dim=self.embed_dim,
                 num_heads=self.num_heads,
-                mlp_dim=self.mlp_dim,
+                mlp_dim=mlp_dim,
                 dropout_rate=self.dropout_rate,
             )
             for _ in range(self.num_layers)
         ]
-        
+
         # Layer norm after transformer
         self.ln_post = nn.LayerNorm()
-        
+
         # Optional MLP head
         if self.apply_mlp:
             self.head = MLP(self.mlp_hidden_dims, activate_final=True)
+
     
     def _split_frames(self, x):
         """Split stacked frames along channel dim.
